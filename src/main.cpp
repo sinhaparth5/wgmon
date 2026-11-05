@@ -292,7 +292,7 @@ static void draw(App& a) {
     if (a.live) left.push_back({"● live", R_LABEL});
     else {
         left.push_back({"‖ paused", R_WARN});
-        if (a.fresh) left.push_back({"  +" + commas(a.fresh) + " new", R_DIM});
+        if (a.fresh) left.push_back({"  +" + commas(a.fresh) + " newer ↓", R_DIM});
     }
     if (a.peer_filter >= 0) left.push_back({"  · " + a.peers[a.peer_filter].name, peer_role(a.peer_filter)});
     Line right;
@@ -328,8 +328,11 @@ static void draw(App& a) {
         a.sel = vis[si]->seq;
         a.top = vis[ti]->seq;
         cur = vis[si];
-        for (int y = 0; y < list_h && ti + size_t(y) < vis.size(); y++) {
-            size_t i = ti + size_t(y);
+        // Bottom-align like a chat log: newest is always the bottom row, even when the list is short.
+        const int shown = int(std::min(vis.size() - ti, size_t(list_h)));
+        for (int r = 0; r < shown; r++) {
+            int y = list_h - shown + r;
+            size_t i = ti + size_t(r);
             if (i == si) {
                 put(list_y + y, 0, {{"▎", R_LABEL}, {" "}}, 2, true);
                 put(list_y + y, 2, row(a, *vis[i]), W - 4, true);
@@ -367,7 +370,8 @@ static void draw(App& a) {
     } else {
         Line h;
         hint(h, "j k", "move");
-        hint(h, "space", a.live ? "pause" : "live");
+        if (a.live) hint(h, "space", "pause");
+        else hint(h, "n", "newest");
         hint(h, "/", "filter");
         hint(h, "tab", "peer");
         hint(h, "x", "hex");
@@ -405,8 +409,8 @@ static void key(App& a, int ch) {
     case 'k': case KEY_UP: move_sel(a, -1); break;
     case KEY_NPAGE: case 'd': move_sel(a, a.page); break;
     case KEY_PPAGE: case 'u': move_sel(a, -a.page); break;
-    case 'g': case KEY_HOME: move_sel(a, -LONG_MAX / 2); break;
-    case 'G': case KEY_END: a.live = true; break;
+    case KEY_HOME: move_sel(a, -LONG_MAX / 2); break;  // oldest
+    case 'G': case 'n': case KEY_END: a.live = true, a.fresh = 0; break;  // newest
     case ' ':
         a.live = !a.live;
         a.fresh = 0;
