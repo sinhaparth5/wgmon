@@ -1,0 +1,39 @@
+# Push a CalVer tag (git tag 2026.11.0 && git push origin 2026.11.0) → GitHub Release with static binaries.
+name: release
+
+on:
+  push:
+    tags: ["20[0-9][0-9].[0-9]*.[0-9]*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+      - run: make dist VERSION=${{ github.ref_name }} && mv dist/wgmon wgmon-linux-${{ matrix.arch }}
+      - run: ./wgmon-linux-${{ matrix.arch }} --version | grep -qx "wgmon ${{ github.ref_name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wgmon-linux-${{ matrix.arch }}
+          path: wgmon-linux-${{ matrix.arch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: sha256sum wgmon-linux-* > SHA256SUMS
+      - run: gh release create "$GITHUB_REF_NAME" wgmon-linux-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

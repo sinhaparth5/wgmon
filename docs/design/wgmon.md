@@ -77,11 +77,12 @@ The numbers say: one thread, one process, no database.
 ## Releasing (CalVer)
 
 ```
-git tag 2026.11.0
-make dist                 # → dist/wgmon, static, version embedded
-scp dist/wgmon vps:/usr/local/bin/
-ssh vps 'sudo setcap cap_net_raw+ep /usr/local/bin/wgmon'
-ssh -t vps wgmon --peer 10.8.0.2=phone --peer 10.8.0.3=laptop
+git tag 2026.11.0 && git push origin 2026.11.0   # CI: test, build amd64+arm64, publish GitHub Release
+```
+On the VPS, install and update are the same command (`install.sh`): it picks the latest release, verifies
+`SHA256SUMS`, swaps the binary atomically (fine while wgmon runs) and re-applies `cap_net_raw`.
+```
+curl -fsSL https://raw.githubusercontent.com/sinhaparth5/wgmon/master/install.sh | sh
 ```
 Next release in the same month → `2026.11.1`; first release next month → `2026.12.0`.
 
