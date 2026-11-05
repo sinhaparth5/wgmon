@@ -29,7 +29,7 @@ inline std::string ip6(const uint8_t* p) {
     inet_ntop(AF_INET6, p, b, sizeof b);
     return b;
 }
-inline std::string hex16(uint16_t v) { char b[8]; snprintf(b, sizeof b, "0x%04x", v); return b; }
+inline std::string hex16(uint16_t v) { char b[16]; snprintf(b, sizeof b, "0x%04x", v); return b; }
 // Wire text -> safe printable ASCII.
 inline std::string clean(const uint8_t* p, size_t n, size_t max = 200) {
     std::string s;
@@ -526,7 +526,7 @@ inline std::vector<Line> detail(const uint8_t* p, size_t n) {
 inline std::vector<Line> hexdump(const uint8_t* p, size_t n, size_t max_lines) {
     std::vector<Line> out;
     for (size_t off = 0; off < n && out.size() < max_lines; off += 16) {
-        char b[8];
+        char b[24];
         snprintf(b, sizeof b, "%04zx  ", off);
         std::string hex, asc;
         for (size_t i = 0; i < 16; i++) {

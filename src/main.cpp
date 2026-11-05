@@ -194,7 +194,7 @@ static void drain(App& a, int fd, int budget, void (*each)(App&) = nullptr) {
 
 // ---------- rows ----------
 static Line row(const App& a, const Pkt& p) {
-    char t[24];
+    char t[64];
     tm tmv;
     localtime_r(&p.ts.tv_sec, &tmv);
     snprintf(t, sizeof t, "%02d:%02d:%02d.%03ld  ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec, p.ts.tv_nsec / 1000000);
