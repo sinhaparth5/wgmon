@@ -324,6 +324,7 @@ static void draw(App& a) {
         size_t ti = a.live ? 0 : index_of(vis, a.top);
         if (a.live || si >= ti + size_t(list_h)) ti = si + 1 > size_t(list_h) ? si + 1 - size_t(list_h) : 0;
         if (si < ti) ti = si;
+        ti = std::min(ti, vis.size() > size_t(list_h) ? vis.size() - size_t(list_h) : 0);  // no empty tail
         a.sel = vis[si]->seq;
         a.top = vis[ti]->seq;
         cur = vis[si];
@@ -338,9 +339,9 @@ static void draw(App& a) {
 
     // detail
     if (D && cur) {
-        attrset(attr(R_FAINT));
-        mvhline(list_y + list_h, 2, ACS_HLINE, W - 4);
-        attrset(A_NORMAL);
+        std::string rule;
+        for (int i = 0; i < W - 4; i++) rule += "─";
+        put(list_y + list_h, 2, {{rule, R_FAINT}}, W - 4);
         auto lines = detail(cur->raw.data(), cur->raw.size());
         if (cur->len > cur->raw.size())
             lines.push_back({{"       "}, {"stored first " + commas(cur->raw.size()) + " of " + commas(cur->len) + " bytes", R_DIM}});
