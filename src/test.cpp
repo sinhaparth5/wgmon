@@ -45,6 +45,7 @@ static void fuzz_prefixes(const B& pkt) {
         summarize(pkt.data(), i);
         detail(pkt.data(), i);
         hexdump(pkt.data(), i, 100);
+        explain(pkt.data(), i);
     }
 }
 
@@ -57,7 +58,13 @@ int main() {
     B blocked = ipv4(17, cf, phone, udp(53, 53211, dns));
     Summary s = summarize(blocked.data(), blocked.size());
     assert(s.proto == "dns" && s.blocked && text(s.info) == "blocked  bad.example");
-    assert(s.src == "1.1.1.3" && s.dport == 53211);
+    assert(s.src == "1.1.1.3" && s.dport == 53211 && s.dns == 2 && s.qname == "bad.example" && s.dns_id == 0x3f2a);
+    auto has = [](const std::vector<Line>& ls, const char* needle) {
+        for (auto& l : ls) if (text(l).find(needle) != std::string::npos) return true;
+        return false;
+    };
+    assert(has(explain(blocked.data(), blocked.size()), "blocked: the resolver"));
+    assert(has(explain(blocked.data(), blocked.size()), "cloudflare for families"));
     auto d = detail(blocked.data(), blocked.size());
     assert(d.size() == 5 && text(d[4]).find("blocked by resolver") != std::string::npos);
 
@@ -92,12 +99,28 @@ int main() {
 
     // TCP SYN, plain HTTP.
     B syn = ipv4(6, phone, web, tcp(51544, 443, 0x02, {}));
-    assert(text(summarize(syn.data(), syn.size()).info) == "syn");
+    assert(text(summarize(syn.data(), syn.size()).info) == "syn" && summarize(syn.data(), syn.size()).tcpflags == 0x02);
+    assert(has(explain(syn.data(), syn.size()), "syn: step 1") && has(explain(syn.data(), syn.size()), "443 = https"));
     const char* req = "GET /index.html HTTP/1.1\r\nHost: neverssl.com\r\n\r\n";
     B http = ipv4(6, phone, web, tcp(40000, 80, 0x18, B(req, req + strlen(req))));
     s = summarize(http.data(), http.size());
     assert(s.proto == "http" && text(s.info) == "GET /index.html HTTP/1.1" && s.learned[0].second == "neverssl.com");
 
-    for (auto* p : {&blocked, &okpkt, &tls, &syn, &http}) fuzz_prefixes(*p);
+    // WireGuard outer packets (what -i eth0 sees).
+    B pub = {203, 0, 113, 5}, srv = {198, 51, 100, 1};
+    B data = cat(B{4, 0, 0, 0, 0x78, 0x56, 0x34, 0x12, 5, 0, 0, 0, 0, 0, 0, 0}, B(32, 0xaa));
+    B wgdata = ipv4(17, pub, srv, udp(41000, 51820, data));
+    s = summarize(wgdata.data(), wgdata.size());
+    assert(s.proto == "wg" && text(s.info) == "data  #5  16 B inside");
+    assert(text(detail(wgdata.data(), wgdata.size())[2]).find("receiver 0x12345678") != std::string::npos);
+    B wginit = ipv4(17, pub, srv, udp(41000, 51820, cat(B{1, 0, 0, 0, 1, 0, 0, 0}, B(140, 7))));
+    assert(text(summarize(wginit.data(), wginit.size()).info) == "handshake init  0x00000001");
+    B wgka = ipv4(17, pub, srv, udp(41000, 51820, cat(B{4, 0, 0, 0}, B(28, 0))));
+    assert(text(summarize(wgka.data(), wgka.size()).info).rfind("keepalive", 0) == 0);
+    assert(has(explain(wgka.data(), wgka.size()), "keepalive: an empty"));
+    B notwg = ipv4(17, pub, srv, udp(41000, 9999, data));
+    assert(summarize(notwg.data(), notwg.size()).proto == "udp");
+
+    for (auto* p : {&blocked, &okpkt, &tls, &syn, &http, &wgdata, &wginit, &wgka}) fuzz_prefixes(*p);
     puts("ok");
 }

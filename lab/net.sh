@@ -37,6 +37,9 @@ while :; do
         dig +short @"$dns" "$d" A > /dev/null || true
         curl -s -o /dev/null --max-time 5 "https://$d" || true
     done
+    # Cloudflare's test domains: 1.1.1.3 answers 0.0.0.0 (blocked), 1.1.1.1 resolves them.
+    dig +short @"$dns" malware.testcategory.com A > /dev/null || true
+    dig +short @"$dns" nudity.testcategory.com A > /dev/null || true
     curl -s -o /dev/null --max-time 5 http://neverssl.com || true
     ping -c 1 -W 2 1.1.1.1 > /dev/null || true
     sleep 5

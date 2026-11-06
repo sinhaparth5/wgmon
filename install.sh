@@ -51,7 +51,9 @@ $sudo mkdir -p "$DEST"
 $sudo cp "$tmp/$bin" "$DEST/.wgmon.new"
 $sudo chmod 0755 "$DEST/.wgmon.new"
 if command -v setcap > /dev/null; then
-    $sudo setcap cap_net_raw+ep "$DEST/.wgmon.new"   # capture without root; file caps don't survive replacement, so redo each time
+    # net_raw: capture packets; net_admin: read peer status from the WireGuard module (like `wg show`).
+    # File caps don't survive replacement, so redo each time.
+    $sudo setcap cap_net_raw,cap_net_admin+ep "$DEST/.wgmon.new"
     caps=1
 fi
 $sudo mv -f "$DEST/.wgmon.new" "$DEST/wgmon"

@@ -30,6 +30,7 @@ inline std::string ip6(const uint8_t* p) {
     return b;
 }
 inline std::string hex16(uint16_t v) { char b[16]; snprintf(b, sizeof b, "0x%04x", v); return b; }
+inline std::string hex32(uint32_t v) { char b[16]; snprintf(b, sizeof b, "0x%08x", v); return b; }
 // Wire text -> safe printable ASCII.
 inline std::string clean(const uint8_t* p, size_t n, size_t max = 200) {
     std::string s;
@@ -345,11 +346,36 @@ inline std::string http_host(const uint8_t* p, size_t n) {
     return s.substr(i + 8, e == std::string::npos ? std::string::npos : e - i - 8);
 }
 
+// ---------- WireGuard (the outer UDP, seen when watching eth0) ----------
+inline uint16_t wg_port = 51820;  // main() sets the device's real listen port when it can read it
+inline uint32_t le32(const uint8_t* p) { return uint32_t(p[0] | p[1] << 8 | p[2] << 16) | uint32_t(p[3]) << 24; }
+struct Wg { int type = 0; uint32_t sender = 0, receiver = 0; uint64_t counter = 0; size_t inner = 0; };
+
+// Message types from the WireGuard paper; each has a fixed size except data (padded to 16).
+inline Wg parse_wg(const L4& l) {
+    Wg w;
+    const uint8_t* p = l.pl;
+    size_t n = l.pln;
+    if ((l.sport != wg_port && l.dport != wg_port) || n < 4 || (p[1] | p[2] | p[3])) return w;
+    if (p[0] == 1 && n == 148) w.type = 1, w.sender = le32(p + 4);
+    else if (p[0] == 2 && n == 92) w.type = 2, w.sender = le32(p + 4), w.receiver = le32(p + 8);
+    else if (p[0] == 3 && n == 64) w.type = 3, w.receiver = le32(p + 4);
+    else if (p[0] == 4 && n >= 32 && n % 16 == 0)
+        w.type = 4, w.receiver = le32(p + 4), w.counter = le32(p + 8) | uint64_t(le32(p + 12)) << 32, w.inner = n - 32;
+    return w;
+}
+inline const char* wg_kind(const Wg& w) {
+    static const char* k[] = {"", "handshake init", "handshake response", "cookie reply", "data"};
+    return w.type == 4 && !w.inner ? "keepalive" : k[w.type];
+}
+
 // ---------- one-line summary ----------
 struct Summary {
     bool ok = false, ports = false, blocked = false;
-    std::string src, dst, proto;
-    uint16_t sport = 0, dport = 0;
+    std::string src, dst, proto, qname;
+    uint8_t ipproto = 0, tcpflags = 0;
+    int dns = 0;  // 1 query, 2 response
+    uint16_t sport = 0, dport = 0, dns_id = 0;
     Line info;
     std::vector<std::pair<std::string, std::string>> learned;  // ip -> hostname
 };
@@ -360,6 +386,7 @@ inline Summary summarize(const uint8_t* p, size_t n) {
     if (!ip.ok) return s.proto = "?", s.info = {{"not ip", R_DIM}}, s;
     s.ok = true, s.src = ip.src, s.dst = ip.dst;
     s.proto = proto_name(ip.proto, ip.v6);
+    s.ipproto = ip.proto;
     if (ip.fragoff) return s.info = {{"fragment +" + str(ip.fragoff), R_DIM}}, s;
     L4 l = decode_l4(ip);
     if (!l.ok) return s.info = {{ip.l4n ? "" : "truncated", R_DIM}}, s;
@@ -371,6 +398,7 @@ inline Summary summarize(const uint8_t* p, size_t n) {
     s.ports = true, s.sport = l.sport, s.dport = l.dport;
 
     if (ip.proto == 6) {
+        s.tcpflags = l.flags;
         Tls t = l.pln ? parse_tls(l.pl, l.pln) : Tls{};
         std::string http = (l.sport == 80 || l.dport == 80) ? http_line(l.pl, l.pln) : "";
         if (t.kind == TLS_CLIENT_HELLO) {
@@ -396,11 +424,18 @@ inline Summary summarize(const uint8_t* p, size_t n) {
     }
 
     // UDP
+    if (Wg w = parse_wg(l); w.type) {
+        s.proto = "wg";
+        if (w.type == 4) s.info = {{wg_kind(w), R_DIM}, {"  #" + str(w.counter) + (w.inner ? "  " + str(w.inner) + " B inside" : ""), R_FAINT}};
+        else s.info = {{wg_kind(w)}, {"  " + hex32(w.type == 3 ? w.receiver : w.sender), R_FAINT}};
+        return s;
+    }
     if (l.sport == 53 || l.dport == 53) {
         Dns d = parse_dns(l.pl, l.pln);
         if (d.ok && !d.qs.empty()) {
             s.proto = "dns";
             const std::string& q = d.qs[0].name;
+            s.dns = d.qr ? 2 : 1, s.dns_id = d.id, s.qname = q;
             if (!d.qr) {
                 s.info = {{rr_type(d.qs[0].type) + " " + q}};
             } else if (dns_blocked(d)) {
@@ -497,6 +532,16 @@ inline std::vector<Line> detail(const uint8_t* p, size_t n) {
     }
     // UDP
     out.push_back(LB("udp").arrow(str(l.sport), str(l.dport)).kv("len", str(l.ulen)).l);
+    if (Wg w = parse_wg(l); w.type) {
+        LB c("wg");
+        c.t(wg_kind(w));
+        if (w.sender) c.kv("sender", hex32(w.sender));
+        if (w.receiver) c.kv("receiver", hex32(w.receiver));
+        if (w.type == 4) c.kv("counter", str(w.counter)).kv("inside", str(w.inner) + " B padded");
+        else c.kv("size", str(l.pln));
+        out.push_back(c.l);
+        return out;
+    }
     if (l.sport == 53 || l.dport == 53) {
         Dns d = parse_dns(l.pl, l.pln);
         if (!d.ok) return out;
@@ -520,6 +565,107 @@ inline std::vector<Line> detail(const uint8_t* p, size_t n) {
     } else if (l.sport == 443 || l.dport == 443) {
         out.push_back(LB("quic").t(l.pln && (l.pl[0] & 0x80) ? "long header (handshake)" : "short header (encrypted)", R_DIM).l);
     }
+    return out;
+}
+
+// ---------- plain-English notes for the detail pane (`?`) ----------
+inline std::string service(uint16_t p) {
+    switch (p) {
+    case 22: return "ssh";
+    case 53: return "dns";
+    case 80: return "http, unencrypted web";
+    case 123: return "ntp, clock sync";
+    case 443: return "https (tcp) or http/3 (udp)";
+    case 853: return "dns over tls";
+    case 993: return "imap over tls, mail";
+    case 5223: return "apple push notifications";
+    case 5228: return "google push notifications";
+    }
+    return p == wg_port ? "wireguard" : "";
+}
+inline std::string resolver(const std::string& ip) {
+    if (ip == "1.1.1.1" || ip == "1.0.0.1" || ip == "2606:4700:4700::1111") return "cloudflare, no filtering";
+    if (ip == "1.1.1.2" || ip == "1.0.0.2" || ip == "2606:4700:4700::1112") return "cloudflare, blocks malware";
+    if (ip == "1.1.1.3" || ip == "1.0.0.3" || ip == "2606:4700:4700::1113") return "cloudflare for families, blocks malware and adult sites";
+    if (ip == "8.8.8.8" || ip == "8.8.4.4") return "google public dns";
+    if (ip == "9.9.9.9") return "quad9, blocks malware";
+    return "";
+}
+
+inline std::vector<Line> explain(const uint8_t* p, size_t n) {
+    std::vector<Line> out;
+    auto say = [&](const std::string& k, const std::string& v, Role r = R_DIM) { out.push_back(LB(k).t(v, r).l); };
+    Ip ip = decode_ip(p, n);
+    if (!ip.ok) return say("?", "not ip: wgmon decodes ipv4 and ipv6 only"), out;
+    int start = ip.ttl > 128 ? 255 : ip.ttl > 64 ? 128 : 64;
+    const char* who = start == 255 ? "network gear" : start == 128 ? "windows" : "linux, android or apple";
+    say(ip.v6 ? "ip6" : "ip", std::string(ip.v6 ? "hop limit " : "ttl ") + str(ip.ttl) + " = routers it may still cross; started at " +
+        str(start) + " (" + who + "), so about " + str(start - ip.ttl) + (start - ip.ttl == 1 ? " hop" : " hops") + " so far");
+    if (ip.fragoff || ip.mf) say("frag", "one piece of a packet too big for a link; the receiver glues the pieces back together");
+    L4 l = decode_l4(ip);
+    if (!l.ok) return out;
+
+    if (ip.proto == 1 || ip.proto == 58) {
+        std::string nm = icmp_name(l, ip.v6);
+        say(ip.v6 ? "icmp6" : "icmp",
+            nm.rfind("echo", 0) == 0 ? "ping: checks a host is reachable and how long a round trip takes"
+            : nm == "time exceeded" ? "a router dropped a packet whose ttl hit 0; traceroute maps paths with this"
+            : nm == "packet too big" || nm == "fragmentation needed" ? "too big for a link on the path; the sender should shrink its packets (path mtu)"
+            : nm.find("unreachable") != std::string::npos ? "can't be delivered; port unreachable = nothing is listening there"
+            : "a control message from the network stack, not user data");
+        return out;
+    }
+    uint16_t sp = !service(l.dport).empty() ? l.dport : l.sport;
+    std::string svc = service(sp);
+
+    if (ip.proto == 6) {
+        uint8_t f = l.flags;
+        say("tcp", (f & 0x04) ? "rst: connection aborted on the spot (nothing listening, or one side gave up)"
+                   : (f & 0x12) == 0x02 ? "syn: step 1 of the handshake, asking to open a connection"
+                   : (f & 0x12) == 0x12 ? "syn ack: step 2, the server agrees; the client's ack completes it"
+                   : (f & 0x01) ? "fin: this side is done sending; the connection closes politely"
+                   : l.pln ? "carries " + str(l.pln) + " bytes of a stream; seq counts bytes sent, ack = next byte expected back"
+                   : "bare ack: \"got everything up to byte " + str(l.ack) + "\"; unacked data gets resent");
+        if (!svc.empty()) say("port", str(sp) + " = " + svc);
+        if (!l.pln) return out;
+        Tls t = parse_tls(l.pl, l.pln);
+        if (t.kind == TLS_CLIENT_HELLO) {
+            say("tls", "client hello: the site name (sni) travels in plaintext so the server can pick its certificate");
+            if (!t.alpn.empty()) say("alpn", "protocols offered: h2 = http/2, http/1.1 = classic; the server picks one");
+        } else if (t.kind == TLS_SERVER_HELLO) say("tls", "server hello: cipher chosen; with tls 1.3 everything after this is encrypted");
+        else if (t.kind == TLS_APPDATA) say("tls", "encrypted: you (and this vps) see size and timing, never the content");
+        else if (t.kind == TLS_ALERT) say("tls", "alert: usually a polite close, sometimes an error");
+        else if (t.kind == TLS_OTHER) say("tls", "handshake: key exchange and certificates");
+        else if (!http_line(l.pl, l.pln).empty()) say("http", "plain http: unencrypted, readable by this vps and anyone on the path", R_WARN);
+        return out;
+    }
+
+    if (Wg w = parse_wg(l); w.type) {
+        say("wg", w.type == 1 ? "handshake init: the peer proves who it is and starts fresh keys (every ~2 min while active)"
+                  : w.type == 2 ? "handshake response: both sides now share new session keys"
+                  : w.type == 3 ? "cookie reply: the server is busy and asks the peer to prove its address first (dos protection)"
+                  : w.inner ? "one encrypted inner packet (wg0 shows it decrypted); receiver picks the session, counter blocks replays"
+                  : "keepalive: an empty encrypted packet that keeps nat mappings open (persistent-keepalive)");
+        return out;
+    }
+    if (l.sport == 53 || l.dport == 53) {
+        Dns d = parse_dns(l.pl, l.pln);
+        if (!d.ok || d.qs.empty()) return out;
+        auto& q = d.qs[0];
+        std::string what = q.type == 1 ? "ipv4 address" : q.type == 28 ? "ipv6 address"
+                         : q.type == 65 ? "https settings (http/3, ech keys)" : rr_type(q.type) + " record";
+        if (!d.qr) say("dns", "query: asking for the " + what + " of " + q.name + "; plain dns is unencrypted");
+        else if (dns_blocked(d)) say("dns", "blocked: the resolver answered 0.0.0.0, a dead address, so the app can't connect", R_BAD);
+        else if (d.rcode == 3) say("dns", "nxdomain: that name doesn't exist");
+        else if (d.rcode) say("dns", rcode_name(d.rcode) + ": the resolver couldn't answer");
+        else say("dns", "answer: wgmon now labels these addresses " + q.name + "; ttl = seconds it may be cached");
+        std::string srv = d.qr ? ip.src : ip.dst;
+        if (std::string r = resolver(srv); !r.empty()) say("server", srv + " = " + r);
+        return out;
+    }
+    say("udp", sp == 443 ? "quic (http/3): encrypted from the first packet except a little setup in the initial ones"
+                         : "single datagrams, no handshake, no resend; the app copes with loss");
+    if (!svc.empty()) say("port", str(sp) + " = " + svc);
     return out;
 }
 
