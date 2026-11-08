@@ -33,10 +33,10 @@ wgmon --peer 10.8.0.2=phone --peer 10.8.0.3=laptop
 | `e` · `x` | explain the packet in plain English · toggle hex |
 | `w` | save the packets on screen to a `.pcap` (Wireshark / `tcpdump -r`) |
 | `?` | all keys |
-| mouse | wheel scrolls, click selects a row or tab, click the selected row to open it (shift-drag still selects text) |
+| mouse | wheel scrolls, click selects a row, tab or peer, click the selected row to open it (shift-drag still selects text) |
 
-The second line shows each peer's endpoint, last handshake (`idle` after 3 min) and how fast its DNS resolver
-answers. It needs `cap_net_admin`, which `install.sh` grants; a "dropped" counter appears if the kernel ever
+Under the tabs, one row per peer: a health dot (green: handshake in the last 3 min, yellow: idle), endpoint,
+traffic and how fast its DNS resolver answers. Click a peer to show only its traffic. It needs `cap_net_admin`, which `install.sh` grants; a "dropped" counter appears if the kernel ever
 loses packets.
 
 `wgmon -i eth0` watches the outside of the tunnel instead: the encrypted WireGuard handshakes, keepalives and

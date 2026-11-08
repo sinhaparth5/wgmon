@@ -95,6 +95,7 @@ struct App {
     int sort[3] = {};     // per view, index into kSorts
     bool live = true, hex = true, explain = false, typing = false, quit = false, help = false;
     int tab_x[4] = {};                          // header tab boundaries, for clicks
+    int peer_rows = 0, titles_y = 2;            // header layout, for clicks
     int rows_y = 0, rows_n = 0; size_t rows_ti = 0;  // visible list rows, for clicks
     int click_y = -1; timespec click_at{};           // last row click, for double-click
     uint64_t sel = 0, top = 0, fresh = 0;  // fresh = packets arrived while paused
@@ -695,7 +696,7 @@ template <class F> static void draw_rows(App& a, int y0, int h, size_t n, size_t
 
 static void draw_packets(App& a, int list_y, int list_h, int D, int W) {
     auto vis = visible(a);
-    put(2, 2, kTitles, W - 4);
+    put(a.titles_y, 2, kTitles, W - 4);
     a.rows_n = 0;
     if (vis.empty()) {
         center(list_y + list_h / 2, W, a.buf.empty() ? "waiting for packets on " + a.iface + "…" : "no packets match");
@@ -733,7 +734,7 @@ static void draw_packets(App& a, int list_y, int list_h, int D, int W) {
 
 static void draw_agg(App& a, int list_y, int list_h, int W) {
     auto rows = agg_rows(a);
-    put(2, 2, col_titles(a), W - 4);
+    put(a.titles_y, 2, col_titles(a), W - 4);
     a.rows_n = 0;
     if (rows.empty()) {
         bool none = a.view == V_FLOWS ? a.flows.empty() : a.blocked.empty();
@@ -761,6 +762,7 @@ static void draw_help(int W, int H) {
         {"/", "filter by text: domain, ip, port"},
         {"tab  shift-tab", "cycle peer"},
         {"esc", "clear filters, or back to the list"},
+        {"● ○", "peer: green ok · yellow idle · ○ no status"},
         {"", ""},
         {"enter", "show the row's packets (flows, blocked)"},
         {"s", "change sort (flows, blocked)"},
@@ -768,7 +770,7 @@ static void draw_help(int W, int H) {
         {"w", "save the packets on screen to .pcap"},
         {"", ""},
         {"mouse", "wheel scrolls, click selects"},
-        {"", "click a tab or a column title"},
+        {"", "click a tab, a peer or a column title"},
         {"", "click the selected row to open it"},
         {"shift-drag", "select text while the mouse is on"},
         {"q", "quit"},
@@ -799,59 +801,69 @@ static void draw(App& a) {
     timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
 
-    // header
-    Line left = {{"wgmon", R_TEXT}, {"  " WGMON_VERSION "  " + a.iface + "  ", R_DIM}};
+    // header row: name · version · iface, view tabs, then live state and counts on the right
+    put(0, 2, {{"wgmon", R_TEXT}}, 5, false, A_BOLD);
+    std::string meta = (W >= 100 ? " " WGMON_VERSION " · " : " ") + a.iface;
+    put(0, 7, {{meta, R_FAINT}}, W - 9);
     static const char* kTabs[] = {"packets", "flows", "blocked"};
-    a.tab_x[0] = 7 + int(width(left[1].s));
+    int x = 7 + int(width(meta)) + 3;
     for (int v = 0; v < 3; v++) {
-        left.push_back({std::string(kTabs[v]) + "  ", v != a.view ? R_FAINT : v == V_BLOCKED ? R_BAD : R_LABEL});
-        a.tab_x[v + 1] = a.tab_x[v] + int(width(left.back().s));
+        bool on = v == a.view;
+        Role r = !on ? R_DIM : v == V_BLOCKED ? R_BAD : R_LABEL;
+        Line t = {{" " + str(v + 1) + " ", on ? r : R_FAINT}, {std::string(kTabs[v]) + " ", r}};
+        int w = int(width(t));
+        a.tab_x[v] = x;
+        put(0, x, t, w, false, on ? A_REVERSE | A_BOLD : 0);
+        x += w + 1;
     }
-    if (a.view != V_PKTS) {}
-    else if (a.live) left.push_back({"● live", R_LABEL});
-    else {
-        left.push_back({"‖ paused", R_WARN});
-        if (a.fresh) left.push_back({"  +" + commas(a.fresh) + " newer ↓", R_DIM});
-    }
-    if (a.peer_filter >= 0) left.push_back({"  · " + a.peers[size_t(a.peer_filter)].name, peer_role(a.peer_filter)});
-    if (a.drops) left.push_back({"  " + commas(a.drops) + " dropped", R_BAD});
+    a.tab_x[3] = x;
+    size_t np = std::min<size_t>(a.peers.size(), 4);
+    if (H < 14 + int(np)) np = 0;  // small terminal: give the rows to the list
     Line right;
-    for (size_t i = 0; i < a.peers.size() && i < 4; i++) {
-        right.push_back({a.peers[i].name, peer_role(int(i))});
-        right.push_back({"  ↑ " + human(a.peers[i].up) + "  ↓ " + human(a.peers[i].down) + "   ", R_DIM});
+    auto seg = [&](const std::string& s, Role r) {
+        if (!right.empty()) right.push_back({"  ·  ", R_FAINT});
+        right.push_back({s, r});
+    };
+    if (a.view == V_PKTS) {
+        if (a.live) seg("● live", R_LABEL);
+        else seg("‖ paused" + (a.fresh ? "  +" + commas(a.fresh) + " new" : std::string()), R_WARN);
     }
+    if (a.peer_filter >= 0 && !np) seg("only " + a.peers[size_t(a.peer_filter)].name, peer_role(a.peer_filter));
+    if (a.drops) seg(commas(a.drops) + " dropped", R_BAD);
     bool filtered = a.peer_filter >= 0 || !a.filter.empty();
-    std::string cnt = a.view == V_FLOWS ? commas(a.flows.size()) + " flows"
-                    : a.view == V_BLOCKED ? commas(a.blocked.size()) + " domains"
-                    : filtered ? commas(visible(a).size()) + " of " + commas(a.total) : commas(a.total) + " pkts";
-    Line count = {{cnt, R_DIM}};
-    if (width(left) + width(right) + width(count) + 7 > size_t(W)) right.clear();
-    right.insert(right.end(), count.begin(), count.end());
-    put(0, 2, {left[0]}, 5, false, A_BOLD);
-    put(0, 7, Line(left.begin() + 1, left.end()), W - 9);
-    put(0, W - 2 - int(width(right)), right, int(width(right)));
+    seg(a.view == V_FLOWS ? commas(a.flows.size()) + " flows"
+        : a.view == V_BLOCKED ? commas(a.blocked.size()) + " domains"
+        : filtered ? commas(visible(a).size()) + " of " + commas(a.total) + " pkts" : commas(a.total) + " pkts", R_DIM);
+    int rw = int(width(right));
+    if (x + 2 + rw > W - 2) right.resize(1), rw = int(width(right));  // narrow: keep just the state
+    if (x + 2 + rw <= W - 2) put(0, W - 2 - rw, right, rw);
 
-    // peer status: endpoint, handshake age, resolver speed
-    Line st;
-    for (size_t i = 0; i < a.peers.size() && i < 4; i++) {
+    // one row per peer, in fixed columns: health · name · endpoint · handshake · traffic · dns
+    size_t nw = 4;
+    for (size_t i = 0; i < np; i++) nw = std::max(nw, width(a.peers[i].name));
+    nw = std::min<size_t>(nw, 12) + 3;
+    int y = 1;
+    for (size_t i = 0; i < np; i++, y++) {
         const Peer& p = a.peers[i];
-        if (!p.wg && !p.dns_n) continue;
-        st.push_back({p.name, peer_role(int(i))});
-        if (p.wg) {
-            st.push_back({"  " + (p.endpoint.empty() ? "no endpoint" : p.endpoint), R_DIM});
-            int64_t age = now.tv_sec - p.handshake;
-            if (!p.handshake) st.push_back({"  never connected", R_WARN});
-            else if (age > 180) st.push_back({"  idle · handshake " + ago(age) + " ago", R_WARN});  // keys expire after 3 min
-            else st.push_back({"  handshake " + ago(age) + " ago", R_DIM});
-        }
-        if (p.dns_n) st.push_back({"  dns " + str(p.dns_ms / p.dns_n) + " ms", R_DIM});
-        st.push_back({"      "});
+        int64_t age = now.tv_sec - p.handshake;
+        Role hr = !p.wg ? R_FAINT : !p.handshake ? R_BAD : age > 180 ? R_WARN : R_LABEL;  // keys expire after 3 min
+        std::string hs = !p.wg ? "" : !p.handshake ? "never connected"
+                       : (age > 180 ? "idle, handshake " : "handshake ") + ago(age) + " ago";
+        bool only = a.peer_filter == int(i), dim = a.peer_filter >= 0 && !only;
+        put(y, 0, {{only ? "▸ " : "  ", R_LABEL},
+                   {p.wg ? "● " : "○ ", hr},
+                   {fit(p.name, nw), dim ? R_FAINT : peer_role(int(i))},
+                   {fit(p.wg ? (p.endpoint.empty() ? "no endpoint" : p.endpoint) : "", 22), R_DIM},
+                   {fit(hs, 24), hr == R_LABEL ? R_DIM : hr},
+                   {"↑ " + fit(human(p.up), 7) + "↓ " + fit(human(p.down), 9), R_DIM},
+                   {p.dns_n ? "dns " + str(p.dns_ms / p.dns_n) + " ms" : "", R_DIM}}, W - 2);
     }
-    if (!a.note.empty()) st.push_back({a.note, R_FAINT});
-    put(1, 2, st, W - 4);
+    a.peer_rows = int(np);
+    if (!a.note.empty()) put(y++, 4, {{a.note, R_WARN}}, W - 6);
+    a.titles_y = y;
 
-    // layout: header, status, titles, list, rule, detail, footer
-    const int list_y = 3, footer_y = H - 1;
+    // layout: header, titles, list, rule, detail, footer
+    const int list_y = y + 1, footer_y = H - 1;
     const int D = a.view == V_PKTS && H >= 18 ? std::clamp(H / 3, 7, 18) : 0;
     const int list_h = footer_y - list_y - (D ? D + 1 : 0);
     a.page = std::max(1, list_h);
@@ -936,7 +948,11 @@ static void mouse(App& a) {
             if (e.x >= a.tab_x[v] && e.x < a.tab_x[v + 1]) set_view(a, View(v));
         return;
     }
-    if (e.y == 2 && a.view != V_PKTS) {
+    if (e.y >= 1 && e.y <= a.peer_rows) {  // click a peer: show only its traffic, again to clear
+        a.peer_filter = a.peer_filter == e.y - 1 ? -1 : e.y - 1;
+        return;
+    }
+    if (e.y == a.titles_y && a.view != V_PKTS) {
         int so = col_at(a, e.x);
         if (so >= 0) a.sort[a.view] = so, a.agg_sel.clear();
         return;
