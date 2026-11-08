@@ -3,7 +3,7 @@
 	const seo = {
 		title: 'wgmon — see what crosses your WireGuard tunnel, live',
 		description:
-			'wgmon is a free, open-source terminal monitor for WireGuard. Watch decrypted packets, DNS lookups, TLS SNI and blocked traffic per peer, live, on your Linux server.',
+			'Free, open-source WireGuard monitor for your terminal. See every peer\'s DNS lookups, TLS sites and blocked packets, live.',
 		url: site,
 		image: site + 'og.png',
 		ld: {
