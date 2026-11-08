@@ -34,17 +34,20 @@
 	const install = 'curl -fsSL https://raw.githubusercontent.com/sinhaparth5/wgmon/master/install.sh | sh';
 
 	const keys = [
-		['j k', 'Move up and down the packet list'],
-		['n', 'Jump to the newest packet at the bottom'],
+		['← →', 'Switch view: packets, flows, blocked (or 1 2 3)'],
+		['j k', 'Move up and down the list'],
+		['g n', 'Jump to the oldest or newest row'],
 		['space', 'Pause the stream, or go live again'],
 		['/', 'Filter by any text: a domain, an IP, a port'],
 		['tab', 'Cycle through peers; esc clears filters'],
 		['f', 'Flows: one row per connection, bytes each way, rtt, state'],
 		['b', 'Blocked: domains your resolver answered with 0.0.0.0'],
-		['enter', 'In flows or blocked, show that row’s packets'],
-		['?', 'Explain the selected packet in plain English'],
+		['enter', 'In flows or blocked, show that row’s packets; esc goes back'],
+		['s', 'Sort flows by newest, bytes, packets, duration or rtt'],
+		['e', 'Explain the selected packet in plain English'],
 		['x', 'Toggle the hex dump under the breakdown'],
-		['w', 'Save the packets on screen to a .pcap']
+		['w', 'Save the packets on screen to a .pcap'],
+		['?', 'Show every key; the mouse works too']
 	];
 
 	const spec = [
@@ -160,7 +163,7 @@ tracker.example.com        phone      3  4m ago
 metrics.example.org        laptop     1  9m ago`
 		},
 		{
-			id: 'explain', key: '?', title: 'Explain',
+			id: 'explain', key: 'e', title: 'Explain',
 			note: 'Plain English for the selected packet, next to the layered breakdown.',
 			body: `IPv4  10.8.0.3 → 140.82.113.6   583 B
 TCP   51122 → 443   PSH ACK

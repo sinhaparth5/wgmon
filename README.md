@@ -22,14 +22,18 @@ wgmon --peer 10.8.0.2=phone --peer 10.8.0.3=laptop
 
 | key | |
 |---|---|
-| `j` `k` · `n` | move · jump to newest (bottom) |
+| `←` `→` · `1` `2` `3` | switch view: packets · flows · blocked (tabs in the header) |
+| `j` `k` · `g` `n` | move · jump to oldest / newest |
 | `space` | pause / live |
-| `/` · `tab` · `esc` | filter text · cycle peer · clear |
+| `/` · `tab` `shift-tab` · `esc` | filter text · cycle peer · clear (or go back to the list you came from) |
 | `f` | flows: one row per connection, bytes each way, duration, handshake rtt, state |
 | `b` | blocked: domains your filtering resolver (1.1.1.3) answered with `0.0.0.0` |
-| `enter` | (in flows / blocked) show that connection's or domain's packets |
-| `?` · `x` | explain the packet in plain English · toggle hex |
+| `enter` | (in flows / blocked) show that connection's or domain's packets; `esc` returns to the same row |
+| `s` | (in flows / blocked) sort by newest, bytes, packets, duration or rtt; or click a column title |
+| `e` · `x` | explain the packet in plain English · toggle hex |
 | `w` | save the packets on screen to a `.pcap` (Wireshark / `tcpdump -r`) |
+| `?` | all keys |
+| mouse | wheel scrolls, click selects a row or tab, click the selected row to open it (shift-drag still selects text) |
 
 The second line shows each peer's endpoint, last handshake (`idle` after 3 min) and how fast its DNS resolver
 answers. It needs `cap_net_admin`, which `install.sh` grants; a "dropped" counter appears if the kernel ever

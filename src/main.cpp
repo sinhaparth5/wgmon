@@ -86,10 +86,17 @@ struct App {
     std::unordered_map<std::string, int> peer_by_key;
     // view state
     View view = V_PKTS;
+    View back = V_PKTS;   // list to return to on esc after enter jumped to its packets
+    std::string back_sel;
     std::string agg_sel;  // selected flow / blocked key; empty = follow the newest
     std::string msg;      // footer message, shown for a few seconds
     timespec msg_at{};
-    bool live = true, hex = true, explain = false, typing = false, quit = false;
+    std::string agg_top;  // first visible flow / blocked row, so clicks don't scroll the list
+    int sort[3] = {};     // per view, index into kSorts
+    bool live = true, hex = true, explain = false, typing = false, quit = false, help = false;
+    int tab_x[4] = {};                          // header tab boundaries, for clicks
+    int rows_y = 0, rows_n = 0; size_t rows_ti = 0;  // visible list rows, for clicks
+    int click_y = -1; timespec click_at{};           // last row click, for double-click
     uint64_t sel = 0, top = 0, fresh = 0;  // fresh = packets arrived while paused
     int page = 10, peer_filter = -1;
     std::string filter;
@@ -516,22 +523,57 @@ static size_t index_of(const std::vector<const Pkt*>& v, uint64_t seq) {
 // ---------- flows / blocked views ----------
 struct Row { std::string key, jump; int peer; Line line; };
 
-static const Line kFlowTitles = {{fit("last", 10) + fit("peer", 10) + fit("proto", 7) + fit("remote", 28) + fit("pkts", 7, true) +
-                                  fit("up", 9, true) + fit("down", 9, true) + fit("dur", 7, true) + fit("rtt", 8, true) + "  state", R_FAINT}};
-static const Line kBlockTitles = {{fit("last", 10) + fit("peer", 10) + fit("domain", 42) + fit("times", 7, true) + "  resolver", R_FAINT}};
+struct Col { const char* name; int w; bool right; int sort; };  // sort = index into kSorts, -1 = not sortable
+static const std::vector<Col> kFlowCols = {{"last", 10, false, 0}, {"peer", 10, false, -1}, {"proto", 7, false, -1},
+                                           {"remote", 28, false, -1}, {"pkts", 7, true, 2}, {"up", 9, true, 1},
+                                           {"down", 9, true, 1}, {"dur", 7, true, 3}, {"rtt", 8, true, 4}, {"  state", 0, false, -1}};
+static const std::vector<Col> kBlockCols = {{"last", 10, false, 0}, {"peer", 10, false, -1}, {"domain", 42, false, -1},
+                                            {"times", 7, true, 1}, {"  resolver", 0, false, -1}};
+static const std::vector<std::string> kSorts[3] = {{}, {"newest", "bytes", "packets", "duration", "rtt"}, {"newest", "times"}};
+
+static const std::vector<Col>& cols(const App& a) { return a.view == V_FLOWS ? kFlowCols : kBlockCols; }
+static Line col_titles(const App& a) {  // the sorted column is highlighted
+    Line l;
+    for (auto& c : cols(a))
+        l.push_back({c.w ? fit(c.name, size_t(c.w), c.right) : c.name, c.sort == a.sort[a.view] ? R_LABEL : R_FAINT});
+    return l;
+}
+static int col_at(const App& a, int x) {  // sort index of the column under screen x, or -1
+    x -= 2;
+    for (auto& c : cols(a)) {
+        if (!c.w || x < c.w) return c.sort;
+        x -= c.w;
+    }
+    return -1;
+}
 
 static std::vector<Row> agg_rows(const App& a) {
     std::vector<Row> rows;
     auto pname = [&](int i) { return i >= 0 ? a.peers[size_t(i)].name : "?"; };
-    auto sorted = [&](auto& m) {
+    // Ascending, so the newest / biggest row sits at the bottom where the selection starts.
+    auto sorted = [&](auto& m, auto rank) {
         std::vector<const std::pair<const std::string, std::decay_t<decltype(m.begin()->second)>>*> v;
         for (auto& kv : m)
             if (match(a, kv.second.peer, kv.second.hay)) v.push_back(&kv);
-        std::sort(v.begin(), v.end(), [](auto* x, auto* y) { return older(x->second.last, y->second.last); });
+        std::sort(v.begin(), v.end(), [&](auto* x, auto* y) {
+            int64_t rx = rank(x->second), ry = rank(y->second);
+            return rx != ry ? rx < ry : older(x->second.last, y->second.last);
+        });
         return v;
     };
+    const int so = a.sort[a.view];
+    auto flow_rank = [so](const Flow& f) -> int64_t {
+        switch (so) {
+        case 1: return int64_t(f.up + f.down);
+        case 2: return int64_t(f.pkts);
+        case 3: return ms_between(f.first, f.last);
+        case 4: return f.rtt;
+        }
+        return 0;
+    };
+    auto block_rank = [so](const Blocked& b) -> int64_t { return so == 1 ? int64_t(b.n) : 0; };
     if (a.view == V_FLOWS)
-        for (auto* kv : sorted(a.flows)) {
+        for (auto* kv : sorted(a.flows, flow_rank)) {
             const Flow& f = kv->second;
             rows.push_back({kv->first, f.remote, f.peer,
                             {{hms(f.last) + "  ", R_DIM},
@@ -546,7 +588,7 @@ static std::vector<Row> agg_rows(const App& a) {
                              {f.state, f.state == "reset" ? R_WARN : R_DIM}}});
         }
     else
-        for (auto* kv : sorted(a.blocked)) {
+        for (auto* kv : sorted(a.blocked, block_rank)) {
             const Blocked& b = kv->second;
             rows.push_back({kv->first, b.domain, b.peer,
                             {{hms(b.last) + "  ", R_DIM},
@@ -640,8 +682,9 @@ static void center(int y, int W, const std::string& msg) {
 }
 
 // Bottom-aligned like a chat log: the newest row is always the last line, even when the list is short.
-template <class F> static void draw_rows(int y0, int h, size_t n, size_t si, size_t ti, int W, F line) {
+template <class F> static void draw_rows(App& a, int y0, int h, size_t n, size_t si, size_t ti, int W, F line) {
     const int shown = int(std::min(n - ti, size_t(h)));
+    a.rows_y = y0 + h - shown, a.rows_n = shown, a.rows_ti = ti;
     for (int r = 0; r < shown; r++) {
         int y = y0 + h - shown + r;
         size_t i = ti + size_t(r);
@@ -653,6 +696,7 @@ template <class F> static void draw_rows(int y0, int h, size_t n, size_t si, siz
 static void draw_packets(App& a, int list_y, int list_h, int D, int W) {
     auto vis = visible(a);
     put(2, 2, kTitles, W - 4);
+    a.rows_n = 0;
     if (vis.empty()) {
         center(list_y + list_h / 2, W, a.buf.empty() ? "waiting for packets on " + a.iface + "…" : "no packets match");
         return;
@@ -665,7 +709,7 @@ static void draw_packets(App& a, int list_y, int list_h, int D, int W) {
     a.sel = vis[si]->seq;
     a.top = vis[ti]->seq;
     const Pkt* cur = vis[si];
-    draw_rows(list_y, list_h, vis.size(), si, ti, W, [&](size_t i) { return row(a, *vis[i]); });
+    draw_rows(a, list_y, list_h, vis.size(), si, ti, W, [&](size_t i) { return row(a, *vis[i]); });
 
     if (!D) return;
     std::string rule;
@@ -689,16 +733,59 @@ static void draw_packets(App& a, int list_y, int list_h, int D, int W) {
 
 static void draw_agg(App& a, int list_y, int list_h, int W) {
     auto rows = agg_rows(a);
-    put(2, 2, a.view == V_FLOWS ? kFlowTitles : kBlockTitles, W - 4);
+    put(2, 2, col_titles(a), W - 4);
+    a.rows_n = 0;
     if (rows.empty()) {
         bool none = a.view == V_FLOWS ? a.flows.empty() : a.blocked.empty();
         center(list_y + list_h / 2, W, !none ? "nothing matches" : a.view == V_FLOWS ? "no connections yet…"
                                             : "nothing blocked yet (only a filtering resolver like 1.1.1.3 blocks)");
         return;
     }
-    size_t si = agg_index(a, rows);
-    size_t ti = si + 1 > size_t(list_h) ? si + 1 - size_t(list_h) : 0;
-    draw_rows(list_y, list_h, rows.size(), si, ti, W, [&](size_t i) { return rows[i].line; });
+    size_t si = agg_index(a, rows), h = size_t(list_h), ti = SIZE_MAX;
+    for (size_t i = 0; !a.agg_sel.empty() && i < rows.size(); i++)
+        if (rows[i].key == a.agg_top) ti = i;
+    if (ti == SIZE_MAX || si >= ti + h) ti = si + 1 > h ? si + 1 - h : 0;
+    if (si < ti) ti = si;
+    ti = std::min(ti, rows.size() > h ? rows.size() - h : 0);
+    a.agg_top = rows[ti].key;
+    draw_rows(a, list_y, list_h, rows.size(), si, ti, W, [&](size_t i) { return rows[i].line; });
+}
+
+static void draw_help(int W, int H) {
+    static const std::vector<std::pair<std::string, std::string>> kHelp = {
+        {"← →  1 2 3", "switch view: packets · flows · blocked"},
+        {"j k  ↑ ↓", "move"},
+        {"d u  pgdn pgup", "page down / up"},
+        {"g  n", "oldest / newest"},
+        {"space", "pause / live (packets)"},
+        {"/", "filter by text: domain, ip, port"},
+        {"tab  shift-tab", "cycle peer"},
+        {"esc", "clear filters, or back to the list"},
+        {"", ""},
+        {"enter", "show the row's packets (flows, blocked)"},
+        {"s", "change sort (flows, blocked)"},
+        {"e  x", "explain the packet · toggle hex"},
+        {"w", "save the packets on screen to .pcap"},
+        {"", ""},
+        {"mouse", "wheel scrolls, click selects"},
+        {"", "click a tab or a column title"},
+        {"", "click the selected row to open it"},
+        {"shift-drag", "select text while the mouse is on"},
+        {"q", "quit"},
+    };
+    const int bw = std::min(W - 4, 62), bh = std::min(H - 2, int(kHelp.size()) + 4);
+    const int x = (W - bw) / 2, y = (H - bh) / 2;
+    std::string bar;
+    for (int i = 0; i < bw - 2; i++) bar += "─";
+    std::string blank(size_t(bw - 2), ' ');
+    put(y, x, {{"╭" + bar + "╮", R_FAINT}}, bw);
+    for (int i = 1; i < bh - 1; i++) put(y + i, x, {{"│", R_FAINT}, {blank}, {"│", R_FAINT}}, bw);
+    put(y + bh - 1, x, {{"╰" + bar + "╯", R_FAINT}}, bw);
+    put(y, x + 2, {{" keys ", R_TEXT}}, 6);
+    for (int i = 0; i < bh - 4; i++)
+        put(y + 2 + i, x + 3, {{fit(kHelp[size_t(i)].first, 16), R_LABEL}, {kHelp[size_t(i)].second, R_DIM}}, bw - 6);
+    std::string close = " any key closes ";
+    put(y + bh - 1, x + bw - 2 - int(width(close)), {{close, R_FAINT}}, int(width(close)));
 }
 
 static void draw(App& a) {
@@ -714,8 +801,13 @@ static void draw(App& a) {
 
     // header
     Line left = {{"wgmon", R_TEXT}, {"  " WGMON_VERSION "  " + a.iface + "  ", R_DIM}};
-    if (a.view == V_FLOWS) left.push_back({"flows", R_LABEL});
-    else if (a.view == V_BLOCKED) left.push_back({"blocked", R_BAD});
+    static const char* kTabs[] = {"packets", "flows", "blocked"};
+    a.tab_x[0] = 7 + int(width(left[1].s));
+    for (int v = 0; v < 3; v++) {
+        left.push_back({std::string(kTabs[v]) + "  ", v != a.view ? R_FAINT : v == V_BLOCKED ? R_BAD : R_LABEL});
+        a.tab_x[v + 1] = a.tab_x[v] + int(width(left.back().s));
+    }
+    if (a.view != V_PKTS) {}
     else if (a.live) left.push_back({"● live", R_LABEL});
     else {
         left.push_back({"‖ paused", R_WARN});
@@ -779,9 +871,11 @@ static void draw(App& a) {
         hint(h, "j k", "move");
         if (!a.agg_sel.empty()) hint(h, "n", "newest");
         hint(h, "enter", "show packets");
+        hint(h, "s", "sort: " + kSorts[a.view][size_t(a.sort[a.view])]);
         hint(h, "/", "filter");
         hint(h, "tab", "peer");
-        hint(h, "esc", "back");
+        hint(h, "← →", "view");
+        hint(h, "?", "help");
         hint(h, "q", "quit");
     } else {
         hint(h, "j k", "move");
@@ -789,10 +883,11 @@ static void draw(App& a) {
         else hint(h, "n", "newest");
         hint(h, "/", "filter");
         hint(h, "tab", "peer");
-        hint(h, "f", "flows");
-        hint(h, "b", "blocked");
-        hint(h, "?", a.explain ? "hex" : "explain");
+        hint(h, "← →", "view");
+        if (a.back != V_PKTS) hint(h, "esc", a.back == V_FLOWS ? "flows" : "blocked");
+        hint(h, "e", a.explain ? "hex" : "explain");
         hint(h, "w", "save");
+        hint(h, "?", "help");
         hint(h, "q", "quit");
     }
     if (!a.msg.empty() && ms_between(a.msg_at, now) < 4000) put(footer_y, 2, {{a.msg, R_LABEL}}, W - 4);
@@ -803,6 +898,7 @@ static void draw(App& a) {
         put(footer_y, 2, f, W - 6 - hw);
         put(footer_y, W - 2 - hw, h, hw);
     } else put(footer_y, 2, h, W - 4);
+    if (a.help) draw_help(W, H);
     refresh();
 }
 
@@ -822,11 +918,61 @@ static void move_sel(App& a, long d) {
 }
 
 static void set_view(App& a, View v) {
-    a.view = a.view == v ? V_PKTS : v;
+    a.view = v;
     a.agg_sel.clear();
+    a.back = V_PKTS;
+}
+
+static void key(App& a, int ch);
+
+static void mouse(App& a) {
+    MEVENT e;
+    if (getmouse(&e) != OK) return;
+    if (e.bstate & BUTTON4_PRESSED) return move_sel(a, -3);
+    if (e.bstate & BUTTON5_PRESSED) return move_sel(a, 3);
+    if (!(e.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED))) return;
+    if (e.y == 0) {
+        for (int v = 0; v < 3; v++)
+            if (e.x >= a.tab_x[v] && e.x < a.tab_x[v + 1]) set_view(a, View(v));
+        return;
+    }
+    if (e.y == 2 && a.view != V_PKTS) {
+        int so = col_at(a, e.x);
+        if (so >= 0) a.sort[a.view] = so, a.agg_sel.clear();
+        return;
+    }
+    if (e.y < a.rows_y || e.y >= a.rows_y + a.rows_n) return;
+    size_t i = a.rows_ti + size_t(e.y - a.rows_y);
+    if (a.view == V_PKTS) {
+        auto v = visible(a);
+        if (i < v.size()) a.sel = v[i]->seq, a.live = false, a.fresh = 0;
+        return;
+    }
+    // Open on a click on the selected row, or a quick second click on the same line
+    // (a live list can reorder between the two clicks).
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    bool dbl = e.y == a.click_y && ms_between(a.click_at, now) < 500;
+    a.click_y = e.y, a.click_at = now;
+    auto rows = agg_rows(a);
+    if (i >= rows.size()) return;
+    if (dbl || i == agg_index(a, rows)) { a.click_y = -1; return key(a, '\n'); }
+    a.agg_sel = i + 1 == rows.size() ? "" : rows[i].key;
 }
 
 static void key(App& a, int ch) {
+    if (ch == KEY_RESIZE) return;
+    if (a.help) {  // any key or click closes help
+        MEVENT e;
+        if (ch == KEY_MOUSE && getmouse(&e) == OK && !(e.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED))) return;
+        a.help = false;
+        return;
+    }
+    if (ch == KEY_MOUSE) {
+        if (!a.typing) mouse(a);
+        else { MEVENT e; getmouse(&e); }
+        return;
+    }
     if (a.typing) {
         if (ch == 27) a.filter.clear(), a.typing = false;
         else if (ch == '\n' || ch == KEY_ENTER) a.typing = false;
@@ -843,28 +989,46 @@ static void key(App& a, int ch) {
     case KEY_NPAGE: case 'd': move_sel(a, a.page); break;
     case KEY_PPAGE: case 'u': move_sel(a, -a.page); break;
     case KEY_HOME: move_sel(a, -LONG_MAX / 2); break;  // oldest
+    case 'g': move_sel(a, -LONG_MAX / 2); break;
     case 'G': case 'n': case KEY_END: a.live = true, a.fresh = 0, a.agg_sel.clear(); break;  // newest
     case ' ':
         if (a.view == V_PKTS) a.live = !a.live, a.fresh = 0;
         break;
     case '/': a.typing = true; break;
     case 27:
-        if (a.view != V_PKTS) set_view(a, a.view);
+        if (a.back != V_PKTS) {  // undo the enter jump: back to the list, same row
+            View b = a.back;
+            std::string s = a.back_sel;
+            a.filter.clear(), a.peer_filter = -1;
+            set_view(a, b);
+            a.agg_sel = s;
+        } else if (a.view != V_PKTS) set_view(a, V_PKTS);
         else a.filter.clear(), a.peer_filter = -1;
         break;
     case '\t': a.peer_filter = a.peer_filter + 1 >= int(a.peers.size()) ? -1 : a.peer_filter + 1; break;
+    case KEY_BTAB: a.peer_filter = (a.peer_filter < 0 ? int(a.peers.size()) : a.peer_filter) - 1; break;
+    case '1': set_view(a, V_PKTS); break;
+    case '2': case 'f': set_view(a, a.view == V_FLOWS ? V_PKTS : V_FLOWS); break;
+    case '3': case 'b': set_view(a, a.view == V_BLOCKED ? V_PKTS : V_BLOCKED); break;
+    case 'l': case KEY_RIGHT: set_view(a, View((a.view + 1) % 3)); break;
+    case 'h': case KEY_LEFT: set_view(a, View((a.view + 2) % 3)); break;
     case 'x': a.hex = !a.hex, a.explain = false; break;
-    case '?': a.explain = !a.explain; break;
-    case 'f': set_view(a, V_FLOWS); break;
-    case 'b': set_view(a, V_BLOCKED); break;
+    case 'e': a.explain = !a.explain; break;
+    case '?': a.help = true; break;
+    case 's':
+        if (a.view != V_PKTS) a.sort[a.view] = (a.sort[a.view] + 1) % int(kSorts[a.view].size()), a.agg_sel.clear();
+        break;
     case '\n': case KEY_ENTER:
         if (a.view != V_PKTS) {  // jump to that flow's / domain's packets
             auto rows = agg_rows(a);
             if (rows.empty()) break;
             const Row& r = rows[agg_index(a, rows)];
+            View from = a.view;
+            std::string key = r.key;
+            set_view(a, V_PKTS);
+            a.back = from, a.back_sel = key;
             a.filter = lower(r.jump);
             a.peer_filter = r.peer;
-            set_view(a, a.view);
             a.live = true, a.fresh = 0;
         }
         break;
@@ -901,6 +1065,8 @@ static void run_tui(App& a, int fd) {
     keypad(stdscr, TRUE);
     nodelay(stdscr, TRUE);
     curs_set(0);
+    mousemask(BUTTON1_PRESSED | BUTTON4_PRESSED | BUTTON5_PRESSED, nullptr);
+    mouseinterval(0);  // no click-detection delay
     init_colors();
 
     bool dirty = true;
