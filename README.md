@@ -49,3 +49,7 @@ make lab-down
 
 Versions are CalVer (`YYYY.0M.MICRO`). Pushing a tag builds and publishes a release.
 Design notes: [docs/design/wgmon.md](docs/design/wgmon.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
