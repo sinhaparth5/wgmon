@@ -1,4 +1,29 @@
 <script lang="ts">
+	const site = 'https://sinhaparth5.github.io/wgmon/';
+	const seo = {
+		title: 'wgmon — see what crosses your WireGuard tunnel, live',
+		description:
+			'wgmon is a free, open-source terminal monitor for WireGuard. Watch decrypted packets, DNS lookups, TLS SNI and blocked traffic per peer, live, on your Linux server.',
+		url: site,
+		image: site + 'og.png',
+		ld: {
+			'@context': 'https://schema.org',
+			'@type': 'SoftwareApplication',
+			name: 'wgmon',
+			description: 'Terminal monitor that shows the decrypted packets crossing a WireGuard interface, live.',
+			applicationCategory: 'DeveloperApplication',
+			operatingSystem: 'Linux',
+			softwareVersion: '2026.11.0',
+			license: 'https://opensource.org/licenses/MIT',
+			url: site,
+			downloadUrl: 'https://github.com/sinhaparth5/wgmon/releases',
+			codeRepository: 'https://github.com/sinhaparth5/wgmon',
+			image: site + 'og.png',
+			author: { '@type': 'Person', name: 'Parth Sinha' },
+			offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' }
+		}
+	};
+
 	import { onMount } from 'svelte';
 	import { fly, fade, draw, crossfade } from 'svelte/transition';
 	import { flip } from 'svelte/animate';
@@ -272,8 +297,24 @@ Everything after this packet is encrypted.`
 <svelte:window onscroll={spy} />
 
 <svelte:head>
-	<title>wgmon — watch your WireGuard tunnel</title>
-	<meta name="description" content="Watch the decrypted packets crossing your WireGuard interface, live, in the terminal." />
+	<title>{seo.title}</title>
+	<meta name="description" content={seo.description} />
+	<meta name="author" content="Parth Sinha" />
+	<link rel="canonical" href={seo.url} />
+	<meta property="og:type" content="website" />
+	<meta property="og:site_name" content="wgmon" />
+	<meta property="og:url" content={seo.url} />
+	<meta property="og:title" content={seo.title} />
+	<meta property="og:description" content={seo.description} />
+	<meta property="og:image" content={seo.image} />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
+	<meta property="og:image:alt" content="wgmon: a live terminal list of decrypted packets crossing a WireGuard tunnel" />
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:title" content={seo.title} />
+	<meta name="twitter:description" content={seo.description} />
+	<meta name="twitter:image" content={seo.image} />
+	{@html `<script type="application/ld+json">${JSON.stringify(seo.ld)}</script>`}
 </svelte:head>
 
 <a class="skip" href="#overview">Skip to content</a>
